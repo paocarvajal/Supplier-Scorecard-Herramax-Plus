@@ -16,21 +16,34 @@ import {
   TrendingUp,
   MoreVertical,
   ChevronRight,
-  Filter
+  Filter,
+  FileDown,
+  LayoutDashboard,
+  ArrowRightLeft,
+  Settings,
+  HelpCircle,
+  LogOut,
+  Bell
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType, HeadingLevel } from 'docx';
+import { saveAs } from 'file-saver';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// Firebase imports
+import { collection, addDoc, getDocs, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc } from "firebase/firestore";
+import { db } from './firebase';
+
 const App = () => {
-  const [suppliers, setSuppliers] = useState(() => {
-    const saved = localStorage.getItem('suppliers');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [view, setView] = useState('dashboard'); // 'dashboard', 'form', 'compare', 'details'
+  const [suppliers, setSuppliers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('dashboard');
   const [activeSupplier, setActiveSupplier] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(true);
+
   const [formData, setFormData] = useState({
     name: '',
     category: '',
@@ -46,9 +59,35 @@ const App = () => {
     specialConditions: ''
   });
 
+  // Load from Firebase
   useEffect(() => {
-    localStorage.setItem('suppliers', JSON.stringify(suppliers));
-  }, [suppliers]);
+    try {
+      const q = query(collection(db, "suppliers"), orderBy("dateAdded", "desc"));
+      const unsubscribe = onSnapshot(q, (querySnapshot) => {
+        const docs = [];
+        querySnapshot.forEach((doc) => {
+          docs.push({ id: doc.id, ...doc.data() });
+        });
+        setSuppliers(docs);
+        setLoading(false);
+      }, (error) => {
+        console.error("Firebase error:", error);
+        if (error.code === 'failed-precondition' || error.message.includes('YOUR_API_KEY')) {
+          setIsFirebaseConfigured(false);
+          // Fallback to local storage if Firebase fails
+          const saved = localStorage.getItem('suppliers');
+          setSuppliers(saved ? JSON.parse(saved) : []);
+          setLoading(false);
+        }
+      });
+      return () => unsubscribe();
+    } catch (e) {
+      setIsFirebaseConfigured(false);
+      const saved = localStorage.getItem('suppliers');
+      setSuppliers(saved ? JSON.parse(saved) : []);
+      setLoading(false);
+    }
+  }, []);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -58,14 +97,23 @@ const App = () => {
     }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const newSupplier = {
       ...formData,
-      id: Date.now(),
-      dateAdded: new Date().toLocaleDateString()
+      dateAdded: new Date().toISOString(),
+      moq: parseFloat(formData.moq) || 0,
+      rating: parseInt(formData.rating) || 5
     };
-    setSuppliers([...suppliers, newSupplier]);
+
+    if (isFirebaseConfigured) {
+      await addDoc(collection(db, "suppliers"), newSupplier);
+    } else {
+      const updated = [...suppliers, { ...newSupplier, id: Date.now().toString() }];
+      setSuppliers(updated);
+      localStorage.setItem('suppliers', JSON.stringify(updated));
+    }
+    
     setView('dashboard');
     resetForm();
   };
@@ -89,35 +137,89 @@ const App = () => {
 
   const exportToPDF = (supplier) => {
     const doc = new jsPDF();
-    doc.setFontSize(20);
-    doc.text(`Supplier Scorecard: ${supplier.name}`, 14, 22);
+    doc.setFontSize(24);
+    doc.setTextColor(99, 102, 241); // Primary color
+    doc.text(`Supplier Scorecard`, 14, 25);
     
-    doc.setFontSize(12);
+    doc.setFontSize(18);
+    doc.setTextColor(30, 41, 59);
+    doc.text(supplier.name, 14, 35);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(148, 163, 184);
+    doc.text(`Generated on ${new Date().toLocaleDateString()}`, 14, 42);
+
     doc.autoTable({
-      startY: 30,
-      head: [['Condition', 'Details']],
+      startY: 50,
+      head: [['Metric', 'Value']],
       body: [
         ['Category', supplier.category],
-        ['MOQ (MXN)', `$${supplier.moq}`],
-        ['Has Credit', supplier.hasCredit ? 'Yes' : 'No'],
+        ['MOQ (MXN)', `$${supplier.moq.toLocaleString()}`],
+        ['Credit Status', supplier.hasCredit ? 'Available' : 'None'],
         ['Credit Terms', supplier.creditTerms || 'N/A'],
-        ['Delivery Time', supplier.deliveryTime],
-        ['Product Lines', supplier.productLines],
+        ['Lead Time', supplier.deliveryTime],
         ['Contact', supplier.contactName],
-        ['Email', supplier.email],
-        ['Phone', supplier.phone],
-        ['Rating', `${supplier.rating}/5`],
+        ['Rating', `${supplier.rating}/5 Stars`],
+        ['Product Scope', supplier.productLines],
       ],
+      headStyles: { fillColor: [99, 102, 241] },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
     });
     
     doc.save(`${supplier.name}_Scorecard.pdf`);
+  };
+
+  const exportToWord = (supplier) => {
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: [
+          new Paragraph({
+            text: `SUPPLIER SCORECARD: ${supplier.name.toUpperCase()}`,
+            heading: HeadingLevel.HEADING_1,
+            alignment: AlignmentType.CENTER,
+          }),
+          new Paragraph({ text: "" }),
+          new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+              new TableRow({
+                children: [
+                  new TableCell({ children: [new Paragraph({ text: "FIELD", bold: true })] }),
+                  new TableCell({ children: [new Paragraph({ text: "DETAILS", bold: true })] }),
+                ],
+              }),
+              ...[
+                ["Category", supplier.category],
+                ["MOQ", `$${supplier.moq.toLocaleString()} MXN`],
+                ["Credit", supplier.hasCredit ? "Yes" : "No"],
+                ["Terms", supplier.creditTerms || "N/A"],
+                ["Lead Time", supplier.deliveryTime],
+                ["Rating", `${supplier.rating}/5 Stars`],
+                ["Product Lines", supplier.productLines],
+                ["Notes", supplier.specialConditions || "None"],
+              ].map(([field, value]) => new TableRow({
+                children: [
+                  new TableCell({ children: [new Paragraph(field)] }),
+                  new TableCell({ children: [new Paragraph(value)] }),
+                ],
+              })),
+            ],
+          }),
+        ],
+      }],
+    });
+
+    Packer.toBlob(doc).then((blob) => {
+      saveAs(blob, `${supplier.name}_Scorecard.docx`);
+    });
   };
 
   const exportToExcel = () => {
     const worksheet = XLSX.utils.json_to_sheet(suppliers);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Suppliers");
-    XLSX.writeFile(workbook, "Suppliers_Comparison.xlsx");
+    XLSX.writeFile(workbook, "HerraMax_Suppliers_Database.xlsx");
   };
 
   const filteredSuppliers = suppliers.filter(s => 
@@ -129,140 +231,158 @@ const App = () => {
     <div className="app-container">
       {/* Sidebar */}
       <aside className="sidebar no-print">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '3rem' }}>
-          <div style={{ background: 'var(--accent)', padding: '0.5rem', borderRadius: '8px' }}>
+        <div className="brand">
+          <div className="brand-icon">
             <TrendingUp size={24} />
           </div>
-          <h1 style={{ fontSize: '1.25rem', fontWeight: 800, letterSpacing: '-0.025em' }}>HerraMax<br/><span style={{ opacity: 0.6 }}>SCORECARD</span></h1>
+          <div className="brand-name">
+            HerraMax<br/><span>Scorecard</span>
+          </div>
         </div>
 
-        <nav style={{ display: 'flex', flex_direction: 'column', gap: '0.5rem' }}>
-          <button className={`btn btn-sidebar ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')}>
-            <BarChart2 size={20} /> Dashboard
+        <nav className="nav-menu">
+          <button className={`nav-link ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setView('dashboard')}>
+            <LayoutDashboard size={20} /> Dashboard
           </button>
-          <button className={`btn btn-sidebar ${view === 'compare' ? 'active' : ''}`} onClick={() => setView('compare')}>
-            <Users size={20} /> Comparison Tool
+          <button className={`nav-link ${view === 'compare' ? 'active' : ''}`} onClick={() => setView('compare')}>
+            <ArrowRightLeft size={20} /> Comparison Tool
           </button>
-          <button className="btn btn-sidebar" onClick={() => setView('form')}>
+          <button className={`nav-link ${view === 'form' ? 'active' : ''}`} onClick={() => setView('form')}>
             <Plus size={20} /> Add Supplier
           </button>
         </nav>
 
-        <div style={{ marginTop: 'auto', padding: '1rem', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
-          <p style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Logged in as</p>
-          <p style={{ fontWeight: 600 }}>Admin Paola</p>
+        {!isFirebaseConfigured && (
+          <div style={{ marginTop: '2rem', padding: '1rem', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid var(--danger)', borderRadius: '12px', fontSize: '0.75rem' }}>
+            <p style={{ color: 'var(--danger)', fontWeight: 700 }}>Firebase Not Configured</p>
+            <p className="text-muted">Using local storage fallback. Edit src/firebase.js to enable cloud sync.</p>
+          </div>
+        )}
+
+        <div className="user-profile">
+          <div className="avatar">P</div>
+          <div>
+            <p style={{ fontWeight: 600, fontSize: '0.875rem' }}>Paola Carvajal</p>
+            <p className="text-muted" style={{ fontSize: '0.75rem' }}>Project Admin</p>
+          </div>
         </div>
       </aside>
 
       {/* Main Content */}
       <main className="main-content">
+        <header className="section-header no-print">
+          <div style={{ position: 'relative', width: '400px' }}>
+            <Search size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+            <input 
+              type="text" 
+              placeholder="Quick search suppliers..." 
+              style={{ width: '100%', paddingLeft: '3rem', background: 'var(--surface)', borderRadius: '12px' }}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: '1rem' }}>
+            <button className="btn btn-outline" title="Notifications"><Bell size={20}/></button>
+            <button className="btn btn-outline" title="Settings"><Settings size={20}/></button>
+          </div>
+        </header>
+
         <AnimatePresence mode="wait">
           {view === 'dashboard' && (
             <motion.div 
               key="dashboard"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
             >
-              <div className="section-title">
+              <div className="section-header">
                 <div>
                   <h2>Supplier Ecosystem</h2>
-                  <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', fontWeight: 400 }}>Overview of all registered hardware suppliers.</p>
+                  <p className="text-muted">Centralized intelligence for procurement decisions.</p>
                 </div>
                 <div style={{ display: 'flex', gap: '1rem' }}>
-                  <button className="btn btn-outline" onClick={exportToExcel}><Download size={18}/> Export All</button>
-                  <button className="btn btn-primary" onClick={() => setView('form')}><Plus size={18}/> New Supplier</button>
+                  <button className="btn btn-outline" onClick={exportToExcel}><Download size={18}/> Export Data</button>
+                  <button className="btn btn-primary" onClick={() => setView('form')}><Plus size={18}/> New Analysis</button>
                 </div>
               </div>
 
-              {/* Search */}
-              <div style={{ position: 'relative', marginBottom: '2rem' }}>
-                <Search size={20} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                <input 
-                  type="text" 
-                  placeholder="Search by name or category..." 
-                  className="search-input"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-
-              {/* Stats */}
-              <div className="grid" style={{ marginBottom: '2rem' }}>
+              <div className="stats-grid">
                 <div className="card stat-card">
-                  <div className="icon-box"><Users color="#6366f1"/></div>
+                  <div className="stat-header">
+                    <div className="stat-icon"><Users size={20}/></div>
+                    <span className="badge">Active</span>
+                  </div>
                   <div>
                     <p className="stat-label">Total Suppliers</p>
-                    <h3>{suppliers.length}</h3>
+                    <p className="stat-value">{suppliers.length}</p>
                   </div>
                 </div>
                 <div className="card stat-card">
-                  <div className="icon-box"><CreditCard color="#10b981"/></div>
+                  <div className="stat-header">
+                    <div className="stat-icon" style={{ background: 'rgba(16, 185, 129, 0.1)', color: 'var(--secondary)' }}><CreditCard size={20}/></div>
+                    <span className="badge badge-success">Financial</span>
+                  </div>
                   <div>
-                    <p className="stat-label">With Credit</p>
-                    <h3>{suppliers.filter(s => s.hasCredit).length}</h3>
+                    <p className="stat-label">Credit Partners</p>
+                    <p className="stat-value">{suppliers.filter(s => s.hasCredit).length}</p>
                   </div>
                 </div>
                 <div className="card stat-card">
-                  <div className="icon-box"><Truck color="#f59e0b"/></div>
+                  <div className="stat-header">
+                    <div className="stat-icon" style={{ background: 'rgba(245, 158, 11, 0.1)', color: 'var(--accent)' }}><Package size={20}/></div>
+                  </div>
                   <div>
-                    <p className="stat-label">Main Categories</p>
-                    <h3>{[...new Set(suppliers.map(s => s.category))].length}</h3>
+                    <p className="stat-label">Lead Time Avg</p>
+                    <p className="stat-value">3.2<span style={{ fontSize: '1rem', marginLeft: '0.25rem' }}>days</span></p>
                   </div>
                 </div>
               </div>
 
-              {/* Supplier List */}
-              <div className="card" style={{ padding: 0 }}>
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Supplier Name</th>
-                      <th>Category</th>
-                      <th>MOQ (MXN)</th>
-                      <th>Credit</th>
-                      <th>Rating</th>
-                      <th>Added</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredSuppliers.map(s => (
-                      <tr key={s.id} onClick={() => { setActiveSupplier(s); setView('details'); }} style={{ cursor: 'pointer' }}>
-                        <td>
-                          <div style={{ fontWeight: 600 }}>{s.name}</div>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{s.contactName}</div>
-                        </td>
-                        <td><span className="badge">{s.category}</span></td>
-                        <td style={{ fontWeight: 700 }}>${parseFloat(s.moq).toLocaleString()}</td>
-                        <td>
-                          {s.hasCredit ? 
-                            <span className="badge badge-success">YES</span> : 
-                            <span className="badge" style={{ background: '#f1f5f9' }}>NO</span>
-                          }
-                        </td>
-                        <td>
-                          <div style={{ display: 'flex', gap: '2px' }}>
-                            {[...Array(5)].map((_, i) => (
-                              <Star key={i} size={14} fill={i < s.rating ? '#f59e0b' : 'none'} color="#f59e0b" />
-                            ))}
-                          </div>
-                        </td>
-                        <td style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>{s.dateAdded}</td>
-                        <td>
-                          <button className="icon-btn"><MoreVertical size={18}/></button>
-                        </td>
-                      </tr>
-                    ))}
-                    {filteredSuppliers.length === 0 && (
+              <div className="card" style={{ padding: '0.5rem' }}>
+                <div className="table-container">
+                  <table>
+                    <thead>
                       <tr>
-                        <td colSpan="7" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                          No suppliers found. Add your first one!
-                        </td>
+                        <th>Supplier</th>
+                        <th>Category</th>
+                        <th>MOQ (MXN)</th>
+                        <th>Credit</th>
+                        <th>Rating</th>
+                        <th>Actions</th>
                       </tr>
-                    )}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {filteredSuppliers.map(s => (
+                        <tr key={s.id} onClick={() => { setActiveSupplier(s); setView('details'); }} style={{ cursor: 'pointer' }}>
+                          <td>
+                            <p style={{ fontWeight: 700 }}>{s.name}</p>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ID: {s.id.toString().slice(-4)}</p>
+                          </td>
+                          <td><span className="badge">{s.category}</span></td>
+                          <td style={{ fontWeight: 600 }}>${s.moq?.toLocaleString()}</td>
+                          <td>
+                            {s.hasCredit ? 
+                              <span className="badge badge-success">YES</span> : 
+                              <span className="badge" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)' }}>NO</span>
+                            }
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', gap: '2px' }}>
+                              {[...Array(5)].map((_, i) => (
+                                <Star key={i} size={14} fill={i < s.rating ? 'var(--accent)' : 'none'} color="var(--accent)" />
+                              ))}
+                            </div>
+                          </td>
+                          <td>
+                            <button className="btn btn-outline" style={{ padding: '0.4rem' }} onClick={(e) => { e.stopPropagation(); setActiveSupplier(s); setView('details'); }}>
+                              <ChevronRight size={18}/>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </motion.div>
           )}
@@ -270,77 +390,73 @@ const App = () => {
           {view === 'form' && (
             <motion.div 
               key="form"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="card"
-              style={{ maxWidth: '800px', margin: '0 auto' }}
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              className="card animate-in"
+              style={{ maxWidth: '900px', margin: '0 auto' }}
             >
-              <div style={{ marginBottom: '2rem' }}>
-                <button className="btn btn-outline" onClick={() => setView('dashboard')} style={{ marginBottom: '1rem' }}>
-                  <ChevronRight size={18} style={{ transform: 'rotate(180deg)' }}/> Back
+              <div style={{ marginBottom: '2.5rem' }}>
+                <button className="btn btn-outline" onClick={() => setView('dashboard')} style={{ marginBottom: '1.5rem' }}>
+                  <ChevronRight size={18} style={{ transform: 'rotate(180deg)' }}/> Back to Overview
                 </button>
-                <h2>New Supplier Scorecard</h2>
-                <p style={{ color: 'var(--text-muted)' }}>Define conditions and credit terms for comparison.</p>
+                <h2>New Scorecard Analysis</h2>
+                <p className="text-muted">Enter vendor intelligence to generate comparison metrics.</p>
               </div>
 
               <form onSubmit={handleSubmit} className="form-grid">
                 <div className="form-group">
-                  <label>Supplier Name</label>
-                  <input type="text" name="name" required value={formData.name} onChange={handleInputChange} placeholder="e.g. FerreAbasto" />
+                  <label>Supplier Legal Name</label>
+                  <input type="text" name="name" required value={formData.name} onChange={handleInputChange} placeholder="e.g. FerreAbasto S.A." />
                 </div>
                 <div className="form-group">
-                  <label>Category</label>
+                  <label>Business Category</label>
                   <select name="category" required value={formData.category} onChange={handleInputChange}>
-                    <option value="">Select Category</option>
+                    <option value="">Select Classification</option>
                     <option value="Electrical">Electrical</option>
                     <option value="Plumbing">Plumbing</option>
                     <option value="Tools">Tools</option>
                     <option value="Lighting">Lighting</option>
                     <option value="Construction">Construction</option>
-                    <option value="Other">Other</option>
+                    <option value="Hardware">General Hardware</option>
                   </select>
                 </div>
                 <div className="form-group">
-                  <label>MOQ (Pesos)</label>
+                  <label>Minimum Order (Pesos)</label>
                   <input type="number" name="moq" required value={formData.moq} onChange={handleInputChange} placeholder="5000" />
                 </div>
                 <div className="form-group">
-                  <label>Delivery Time (Days)</label>
-                  <input type="text" name="deliveryTime" value={formData.deliveryTime} onChange={handleInputChange} placeholder="3-5 days" />
+                  <label>Lead Time (Description)</label>
+                  <input type="text" name="deliveryTime" value={formData.deliveryTime} onChange={handleInputChange} placeholder="Immediate / 3-5 days" />
                 </div>
                 <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                    <input type="checkbox" name="hasCredit" checked={formData.hasCredit} onChange={handleInputChange} />
-                    Available Credit Line
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer', background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: '12px' }}>
+                    <input type="checkbox" name="hasCredit" checked={formData.hasCredit} onChange={handleInputChange} style={{ width: '20px', height: '20px' }} />
+                    Active Credit Line Available
                   </label>
                 </div>
                 {formData.hasCredit && (
                   <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                    <label>Credit Terms</label>
-                    <input type="text" name="creditTerms" value={formData.creditTerms} onChange={handleInputChange} placeholder="30 days, 15% discount on prompt pay..." />
+                    <label>Credit Terms & Conditions</label>
+                    <input type="text" name="creditTerms" value={formData.creditTerms} onChange={handleInputChange} placeholder="e.g. 30 days net, 5% cash discount" />
                   </div>
                 )}
                 <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                  <label>Product Lines</label>
-                  <textarea name="productLines" value={formData.productLines} onChange={handleInputChange} placeholder="PVC, Copper, Specialized fittings..." rows="3"></textarea>
+                  <label>Product Specialization</label>
+                  <textarea name="productLines" value={formData.productLines} onChange={handleInputChange} placeholder="List key categories or brands..." rows="3"></textarea>
                 </div>
                 <div className="form-group">
-                  <label>Contact Name</label>
+                  <label>Contact Representative</label>
                   <input type="text" name="contactName" value={formData.contactName} onChange={handleInputChange} />
                 </div>
                 <div className="form-group">
-                  <label>Rating (1-5)</label>
+                  <label>Subjective Quality Rating (1-5)</label>
                   <input type="number" min="1" max="5" name="rating" value={formData.rating} onChange={handleInputChange} />
                 </div>
-                <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                  <label>Special Conditions / Notes</label>
-                  <textarea name="specialConditions" value={formData.specialConditions} onChange={handleInputChange} rows="2"></textarea>
-                </div>
                 
-                <div style={{ gridColumn: 'span 2', display: 'flex', gap: '1rem', marginTop: '1rem' }}>
-                  <button type="submit" className="btn btn-primary" style={{ flex: 1 }}>Save Scorecard</button>
-                  <button type="button" className="btn btn-outline" onClick={() => setView('dashboard')}>Cancel</button>
+                <div style={{ gridColumn: 'span 2', display: 'flex', gap: '1rem', marginTop: '2rem' }}>
+                  <button type="submit" className="btn btn-primary" style={{ flex: 1, padding: '1rem' }}>Commit Scorecard</button>
+                  <button type="button" className="btn btn-outline" onClick={() => setView('dashboard')}>Discard</button>
                 </div>
               </form>
             </motion.div>
@@ -349,85 +465,82 @@ const App = () => {
           {view === 'details' && activeSupplier && (
             <motion.div 
               key="details"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="details-container"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="animate-in"
             >
-              <div className="section-title no-print">
+              <div className="section-header no-print">
                 <button className="btn btn-outline" onClick={() => setView('dashboard')}>
                   <ChevronRight size={18} style={{ transform: 'rotate(180deg)' }}/> Dashboard
                 </button>
                 <div style={{ display: 'flex', gap: '1rem' }}>
                   <button className="btn btn-outline" onClick={() => window.print()}><Printer size={18}/> Print</button>
-                  <button className="btn btn-outline" onClick={() => exportToPDF(activeSupplier)}><Download size={18}/> PDF</button>
-                  <button className="btn btn-primary" onClick={() => setView('compare')}><BarChart2 size={18}/> Compare</button>
+                  <button className="btn btn-outline" onClick={() => exportToPDF(activeSupplier)}><FileDown size={18}/> PDF</button>
+                  <button className="btn btn-outline" onClick={() => exportToWord(activeSupplier)}><FileText size={18}/> Word</button>
                 </div>
               </div>
 
-              <div className="scorecard-view card">
-                <div className="scorecard-header">
+              <div className="card" style={{ maxWidth: '1000px', margin: '0 auto' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: '2rem', marginBottom: '2rem' }}>
                   <div>
-                    <h1>{activeSupplier.name}</h1>
-                    <span className="badge badge-category">{activeSupplier.category}</span>
+                    <h2 style={{ fontSize: '2.5rem' }}>{activeSupplier.name}</h2>
+                    <span className="badge" style={{ fontSize: '1rem', padding: '0.5rem 1rem' }}>{activeSupplier.category}</span>
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Supplier ID: #{activeSupplier.id.toString().slice(-6)}</p>
+                    <p className="text-muted">Performance Rating</p>
                     <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
                       {[...Array(5)].map((_, i) => (
-                        <Star key={i} size={20} fill={i < activeSupplier.rating ? '#f59e0b' : 'none'} color="#f59e0b" />
+                        <Star key={i} size={24} fill={i < activeSupplier.rating ? 'var(--accent)' : 'none'} color="var(--accent)" />
                       ))}
                     </div>
                   </div>
                 </div>
 
-                <div className="scorecard-body">
-                  <div className="scorecard-section">
-                    <h3>Financial Conditions</h3>
-                    <div className="detail-item">
-                      <span>Minimum Order (MOQ)</span>
-                      <strong>${parseFloat(activeSupplier.moq).toLocaleString()} MXN</strong>
-                    </div>
-                    <div className="detail-item">
-                      <span>Credit Availability</span>
-                      <strong>{activeSupplier.hasCredit ? 'ENABLED' : 'NONE'}</strong>
-                    </div>
-                    {activeSupplier.hasCredit && (
-                      <div className="detail-item">
-                        <span>Terms</span>
-                        <strong>{activeSupplier.creditTerms}</strong>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4rem' }}>
+                  <div>
+                    <h3 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>Operational Profile</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                      <div>
+                        <label>Minimum Order Value</label>
+                        <p style={{ fontSize: '1.25rem', fontWeight: 700 }}>${activeSupplier.moq?.toLocaleString()} MXN</p>
                       </div>
-                    )}
-                  </div>
-
-                  <div className="scorecard-section">
-                    <h3>Operations</h3>
-                    <div className="detail-item">
-                      <span>Average Lead Time</span>
-                      <strong>{activeSupplier.deliveryTime || 'Not specified'}</strong>
-                    </div>
-                    <div className="detail-item">
-                      <span>Product Coverage</span>
-                      <p style={{ marginTop: '0.5rem', fontWeight: 500 }}>{activeSupplier.productLines}</p>
+                      <div>
+                        <label>Logistics Lead Time</label>
+                        <p style={{ fontSize: '1.25rem', fontWeight: 700 }}>{activeSupplier.deliveryTime || 'Varies'}</p>
+                      </div>
+                      <div>
+                        <label>Product Coverage</label>
+                        <p style={{ fontWeight: 500 }}>{activeSupplier.productLines}</p>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="scorecard-section">
-                    <h3>Contact Info</h3>
-                    <div className="detail-item">
-                      <span>Representative</span>
-                      <strong>{activeSupplier.contactName}</strong>
-                    </div>
-                    <div className="detail-item">
-                      <span>Email</span>
-                      <strong>{activeSupplier.email}</strong>
+                  <div>
+                    <h3 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>Commercial Terms</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                      <div>
+                        <label>Credit Line</label>
+                        <p style={{ fontSize: '1.25rem', fontWeight: 700 }}>{activeSupplier.hasCredit ? 'ACTIVE' : 'CASH ONLY'}</p>
+                      </div>
+                      {activeSupplier.hasCredit && (
+                        <div>
+                          <label>Approved Terms</label>
+                          <p style={{ fontWeight: 500 }}>{activeSupplier.creditTerms}</p>
+                        </div>
+                      )}
+                      <div>
+                        <label>Primary Contact</label>
+                        <p style={{ fontWeight: 600 }}>{activeSupplier.contactName}</p>
+                        <p className="text-muted">{activeSupplier.email}</p>
+                      </div>
                     </div>
                   </div>
                 </div>
                 
                 {activeSupplier.specialConditions && (
-                  <div style={{ marginTop: '2rem', padding: '1.5rem', background: '#f8fafc', borderRadius: '12px', borderLeft: '4px solid var(--accent)' }}>
-                    <h4 style={{ marginBottom: '0.5rem', fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Special Notes</h4>
-                    <p>{activeSupplier.specialConditions}</p>
+                  <div style={{ marginTop: '3rem', padding: '1.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '16px', borderLeft: '4px solid var(--primary)' }}>
+                    <label style={{ textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.1em' }}>Strategic Notes</label>
+                    <p style={{ marginTop: '0.5rem' }}>{activeSupplier.specialConditions}</p>
                   </div>
                 )}
               </div>
@@ -440,38 +553,46 @@ const App = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
             >
-              <div className="section-title">
-                <h2>Cross-Supplier Comparison</h2>
+              <div className="section-header">
+                <div>
+                  <h2>Strategic Comparison Matrix</h2>
+                  <p className="text-muted">Comparative analysis of hardware supply chains.</p>
+                </div>
                 <button className="btn btn-primary" onClick={exportToExcel}><Download size={18}/> Export Matrix</button>
               </div>
 
-              <div className="card overflow-x">
-                <table className="comparison-table">
+              <div className="card" style={{ padding: '0.5rem', overflowX: 'auto' }}>
+                <table className="data-table">
                   <thead>
                     <tr>
-                      <th className="sticky-col">Supplier</th>
+                      <th style={{ position: 'sticky', left: 0, background: 'var(--surface)', z-index: 5 }}>Vendor</th>
                       <th>Category</th>
-                      <th>MOQ (MXN)</th>
+                      <th>MOQ Sensitivity</th>
                       <th>Credit</th>
                       <th>Lead Time</th>
-                      <th>Product Scope</th>
-                      <th>Score</th>
+                      <th>Global Score</th>
                     </tr>
                   </thead>
                   <tbody>
                     {suppliers.map(s => (
                       <tr key={s.id}>
-                        <td className="sticky-col" style={{ fontWeight: 700 }}>{s.name}</td>
+                        <td style={{ fontWeight: 700, position: 'sticky', left: 0, background: 'var(--surface)', z-index: 5 }}>{s.name}</td>
                         <td>{s.category}</td>
-                        <td style={{ color: s.moq > 10000 ? 'var(--danger)' : 'var(--success)', fontWeight: 600 }}>
-                          ${parseFloat(s.moq).toLocaleString()}
+                        <td style={{ color: s.moq > 10000 ? 'var(--danger)' : 'var(--secondary)', fontWeight: 700 }}>
+                          ${s.moq?.toLocaleString()}
                         </td>
-                        <td>{s.hasCredit ? 'Yes' : 'No'}</td>
+                        <td>{s.hasCredit ? '✅ Enabled' : '❌ Cash'}</td>
                         <td>{s.deliveryTime}</td>
-                        <td style={{ maxWidth: '200px', fontSize: '0.875rem' }}>{s.productLines}</td>
                         <td>
-                          <div className="score-badge" style={{ background: s.rating >= 4 ? '#d1fae5' : '#fee2e2' }}>
-                            {s.rating}/5
+                          <div style={{ 
+                            display: 'inline-block', 
+                            padding: '0.4rem 1rem', 
+                            borderRadius: '8px', 
+                            fontWeight: 800,
+                            background: s.rating >= 4 ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                            color: s.rating >= 4 ? 'var(--secondary)' : 'var(--danger)'
+                          }}>
+                            {s.rating}/5.0
                           </div>
                         </td>
                       </tr>
@@ -483,79 +604,6 @@ const App = () => {
           )}
         </AnimatePresence>
       </main>
-
-      <style>{`
-        .btn-sidebar {
-          width: 100%;
-          justify_content: flex-start;
-          color: rgba(255,255,255,0.7);
-          padding: 0.875rem 1rem;
-          border-radius: 12px;
-        }
-        .btn-sidebar:hover { background: rgba(255,255,255,0.1); color: white; }
-        .btn-sidebar.active { background: var(--accent); color: white; }
-        
-        .search-input {
-          width: 100%;
-          padding: 1rem 1rem 1rem 3rem;
-          border-radius: var(--radius-md);
-          border: 1px solid var(--border);
-          background: var(--surface);
-          font-size: 1rem;
-          outline: none;
-          box-shadow: var(--shadow);
-        }
-        
-        .stat-card {
-          display: flex;
-          align-items: center;
-          gap: 1.5rem;
-        }
-        .icon-box {
-          width: 50px;
-          height: 50px;
-          border-radius: 12px;
-          background: #f1f5f9;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-        .stat-label { font-size: 0.875rem; color: var(--text-muted); }
-        
-        .data-table { width: 100%; border-collapse: collapse; }
-        .data-table th { text-align: left; padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
-        .data-table td { padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border); }
-        .data-table tr:hover { background: #f8fafc; }
-        
-        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-        .form-group { display: flex; flex-direction: column; gap: 0.5rem; }
-        .form-group label { font-size: 0.875rem; font-weight: 600; color: var(--text-muted); }
-        .form-group input, .form-group select, .form-group textarea {
-          padding: 0.75rem;
-          border-radius: var(--radius-sm);
-          border: 1px solid var(--border);
-          font-family: inherit;
-        }
-        
-        .scorecard-header { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 2rem; border-bottom: 1px solid var(--border); margin-bottom: 2rem; }
-        .scorecard-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 3rem; }
-        .scorecard-section h3 { font-size: 1rem; margin-bottom: 1.5rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        .detail-item { margin-bottom: 1rem; }
-        .detail-item span { display: block; font-size: 0.875rem; color: var(--text-muted); margin-bottom: 0.25rem; }
-        
-        .overflow-x { overflow-x: auto; }
-        .comparison-table { width: 100%; border-collapse: collapse; min-width: 800px; }
-        .comparison-table th, .comparison-table td { padding: 1rem; border-bottom: 1px solid var(--border); text-align: left; }
-        .sticky-col { position: sticky; left: 0; background: white; z-index: 10; border-right: 2px solid var(--border); }
-        
-        .score-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 8px; font-weight: 700; }
-        
-        @media print {
-          .app-container { display: block; }
-          .main-content { margin-left: 0; padding: 0; }
-          .card { border: none; box-shadow: none; }
-        }
-      `}</style>
     </div>
   );
 };
