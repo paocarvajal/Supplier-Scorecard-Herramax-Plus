@@ -565,7 +565,7 @@ const App = () => {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th style={{ position: 'sticky', left: 0, background: 'var(--surface)', z-index: 5 }}>Vendor</th>
+                      <th style={{ position: 'sticky', left: 0, background: 'var(--surface)', zIndex: 5 }}>Vendor</th>
                       <th>Category</th>
                       <th>MOQ Sensitivity</th>
                       <th>Credit</th>
@@ -576,7 +576,7 @@ const App = () => {
                   <tbody>
                     {suppliers.map(s => (
                       <tr key={s.id}>
-                        <td style={{ fontWeight: 700, position: 'sticky', left: 0, background: 'var(--surface)', z-index: 5 }}>{s.name}</td>
+                        <td style={{ fontWeight: 700, position: 'sticky', left: 0, background: 'var(--surface)', zIndex: 5 }}>{s.name}</td>
                         <td>{s.category}</td>
                         <td style={{ color: s.moq > 10000 ? 'var(--danger)' : 'var(--secondary)', fontWeight: 700 }}>
                           ${s.moq?.toLocaleString()}
